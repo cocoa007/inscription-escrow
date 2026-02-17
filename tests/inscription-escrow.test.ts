@@ -251,6 +251,52 @@ describe("inscription-escrow", () => {
     });
   });
 
+  describe("hardening: minimum price", () => {
+    it("rejects listing with price below MIN_PRICE (1000)", () => {
+      const result = simnet.callPublicFn(
+        CONTRACT, "list-inscription",
+        [Cl.buffer(inscriptionTxid), Cl.uint(0), Cl.uint(999), Cl.uint(0), Cl.buffer(sellerBtc)],
+        seller
+      );
+      expect(result.result).toBeErr(Cl.uint(14)); // ERR_DUST_AMOUNT
+    });
+
+    it("accepts listing with price exactly MIN_PRICE", () => {
+      const result = simnet.callPublicFn(
+        CONTRACT, "list-inscription",
+        [Cl.buffer(inscriptionTxid), Cl.uint(0), Cl.uint(1000), Cl.uint(0), Cl.buffer(sellerBtc)],
+        seller
+      );
+      expect(result.result).toBeOk(Cl.uint(0));
+    });
+
+    it("rejects listing with zero price", () => {
+      const result = simnet.callPublicFn(
+        CONTRACT, "list-inscription",
+        [Cl.buffer(inscriptionTxid), Cl.uint(0), Cl.uint(0), Cl.uint(0), Cl.buffer(sellerBtc)],
+        seller
+      );
+      expect(result.result).toBeErr(Cl.uint(14)); // ERR_DUST_AMOUNT
+    });
+  });
+
+  describe("hardening: self-trade prevention", () => {
+    it("rejects buyer == seller", () => {
+      simnet.callPublicFn(
+        CONTRACT, "list-inscription",
+        [Cl.buffer(inscriptionTxid), Cl.uint(0), Cl.uint(100000), Cl.uint(0), Cl.buffer(sellerBtc)],
+        seller
+      );
+      mintSbtc(seller, 100000);
+      const result = simnet.callPublicFn(
+        CONTRACT, "accept-listing",
+        [Cl.uint(0), Cl.buffer(buyerBtc)],
+        seller  // same as listing seller
+      );
+      expect(result.result).toBeErr(Cl.uint(15)); // ERR_SELF_TRADE
+    });
+  });
+
   describe("zero-premium listing", () => {
     it("works without premium", () => {
       simnet.callPublicFn(

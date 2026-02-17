@@ -1,0 +1,22 @@
+[project]
+name = 'inscription-escrow'
+description = 'Trustless ordinals inscription trading via sBTC escrow'
+authors = []
+telemetry = false
+cache_dir = './.cache'
+
+[[project.requirements]]
+contract_id = 'SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.clarity-bitcoin-lib-v5'
+
+[[project.requirements]]
+contract_id = 'SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.clarity-bitcoin-helper'
+
+[contracts.inscription-escrow]
+path = 'contracts/inscription-escrow-devnet.clar'
+clarity_version = 3
+epoch = 'latest'
+
+[contracts.sbtc-token]
+path = 'contracts/sbtc-token.clar'
+clarity_version = 3
+epoch = 'latest'

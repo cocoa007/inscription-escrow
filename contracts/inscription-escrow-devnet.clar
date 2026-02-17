@@ -29,7 +29,12 @@
 (define-constant ERR_INSCRIPTION_MISMATCH (err u11))
 (define-constant ERR_EXPIRED (err u12))
 (define-constant ERR_NOT_EXPIRED (err u13))
+(define-constant ERR_DUST_AMOUNT (err u14))
+(define-constant ERR_SELF_TRADE (err u15))
 (define-constant ERR_NATIVE_FAILURE (err u99))
+
+;; Minimum listing price in sats (prevent dust listings)
+(define-constant MIN_PRICE u1000)
 
 ;; Expiry in burn blocks (~100 blocks ~ ~17 hours)
 (define-constant EXPIRY u100)
@@ -74,7 +79,7 @@
 ;; ============================================================
 
 (define-private (sbtc-transfer (amount uint) (sender principal) (recipient principal))
-  (contract-call? 'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token
+  (contract-call? .sbtc-token
     transfer amount sender recipient none)
 )
 
@@ -178,6 +183,8 @@
     (premium uint)
     (seller-btc (buff 40)))
   (let ((id (var-get next-id)))
+    ;; Minimum price check
+    (asserts! (>= price MIN_PRICE) ERR_DUST_AMOUNT)
     ;; Prevent duplicate listing of same inscription
     (asserts!
       (map-insert inscription-listings
@@ -214,6 +221,8 @@
   )
     (asserts! (is-eq (get status listing) "open") ERR_ALREADY_DONE)
     (asserts! (is-none (get buyer listing)) ERR_ALREADY_DONE)
+    ;; Prevent self-trade
+    (asserts! (not (is-eq tx-sender (get seller listing))) ERR_SELF_TRADE)
     ;; Transfer sBTC to escrow (contract holds it)
     (try! (sbtc-transfer total tx-sender (as-contract tx-sender)))
     ;; Pay premium directly to seller

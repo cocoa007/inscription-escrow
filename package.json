@@ -1,0 +1,16 @@
+{
+  "name": "inscription-escrow",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@stacks/clarinet-sdk": "^3.12.0",
+    "@stacks/transactions": "^7.3.1",
+    "@types/node": "^25.0.3",
+    "vitest": "^4.0.16",
+    "vitest-environment-clarinet": "^3.0.2"
+  }
+}
