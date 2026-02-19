@@ -27,6 +27,37 @@ npm install
 npm test
 ```
 
+## API
+
+REST API for querying trades on-chain.
+
+```bash
+# Start (mainnet)
+npm run api
+
+# Start (testnet)
+npm run api:testnet
+
+# Or with custom config
+PORT=3100 STACKS_API=https://api.hiro.so CONTRACT_ADDRESS=SP... node api.mjs
+```
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Health check + contract info |
+| `GET` | `/trades` | List trades (query: `?status=open&limit=50&offset=0`) |
+| `GET` | `/trades/:id` | Trade details by ID (includes inscription metadata) |
+| `GET` | `/trades/stats` | Summary stats (total, open, escrowed, done, cancelled) |
+
+### Example
+
+```bash
+curl http://localhost:3100/trades?status=open
+curl http://localhost:3100/trades/0
+```
+
 ## Status
 
 ⚠️ **Pre-audit** — not yet reviewed for production use.

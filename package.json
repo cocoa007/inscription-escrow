@@ -4,9 +4,12 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "api": "node api.mjs",
+    "api:testnet": "STACKS_API=https://api.testnet.hiro.so CONTRACT_ADDRESS=ST3D88581D35Z0ZAM7QFVWTDRM14N1TBEYWCGE4Z3 node api.mjs"
   },
   "dependencies": {
+    "@hono/node-server": "^1.19.9",
     "@noble/hashes": "^2.0.1",
     "@noble/secp256k1": "^3.0.0",
     "@stacks/clarinet-sdk": "^3.12.0",
@@ -15,6 +18,7 @@
     "bip32": "^5.0.1",
     "bitcoinjs-lib": "^7.0.1",
     "ecpair": "^3.0.1",
+    "hono": "^4.12.0",
     "tiny-secp256k1": "^2.2.4",
     "vitest": "^4.0.16",
     "vitest-environment-clarinet": "^3.0.2"
