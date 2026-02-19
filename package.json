@@ -7,9 +7,15 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@noble/hashes": "^2.0.1",
+    "@noble/secp256k1": "^3.0.0",
     "@stacks/clarinet-sdk": "^3.12.0",
     "@stacks/transactions": "^7.3.1",
     "@types/node": "^25.0.3",
+    "bip32": "^5.0.1",
+    "bitcoinjs-lib": "^7.0.1",
+    "ecpair": "^3.0.1",
+    "tiny-secp256k1": "^2.2.4",
     "vitest": "^4.0.16",
     "vitest-environment-clarinet": "^3.0.2"
   }
