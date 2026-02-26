@@ -368,6 +368,41 @@ app.get('/trades/:id', async (c) => {
   }
 });
 
+// --- Ledger validation endpoints (inscription-escrow#3) ---
+
+import { validateInscription, getSellerReputation, preAcceptanceCheck } from './ledger-validator.mjs';
+
+app.get('/validate/:inscriptionId', async (c) => {
+  try {
+    const result = await validateInscription(c.req.param('inscriptionId'));
+    return c.json(result);
+  } catch (err) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+app.get('/reputation/:btcAddress', async (c) => {
+  try {
+    const rep = await getSellerReputation(c.req.param('btcAddress'));
+    if (!rep) return c.json({ error: 'Could not fetch reputation' }, 502);
+    return c.json(rep);
+  } catch (err) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+app.get('/pre-check/:inscriptionId/:sellerBtcAddress', async (c) => {
+  try {
+    const result = await preAcceptanceCheck(
+      c.req.param('inscriptionId'),
+      c.req.param('sellerBtcAddress')
+    );
+    return c.json(result);
+  } catch (err) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
 // --- Start server ---
 console.log(`Inscription Escrow API starting on port ${PORT}`);
 console.log(`Contract: ${CONTRACT_ADDRESS}.${CONTRACT_NAME}`);
