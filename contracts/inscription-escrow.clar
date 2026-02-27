@@ -1,16 +1,23 @@
 ;; inscription-escrow.clar
 ;; Trustless ordinals inscription trading via sBTC escrow on Stacks
 ;;
-;; Flow:
+;; Flow (2-phase settlement, SEC-08/09):
 ;; 1. Seller lists an inscription by specifying the UTXO (txid:vout) holding it,
 ;;    the asking price in sBTC, and their BTC receive address
-;; 2. Buyer accepts by depositing sBTC into escrow (price + optional premium)
-;; 3. Seller sends the inscription UTXO to the buyer's BTC address
-;; 4. Anyone submits the BTC tx proof -> escrow releases sBTC to seller
-;; 5. If seller doesn't deliver within expiry, buyer cancels and gets refund
+;; 2. Buyer accepts by depositing sBTC into escrow (price + premium - both held)
+;; 3. Seller commits within COMMIT_EXPIRY blocks by depositing collateral >= premium
+;;    Transitions listing to "committed" state and resets the expiry timer
+;; 4. Seller sends the inscription UTXO to the buyer's BTC address
+;; 5. Anyone submits the BTC tx proof -> escrow releases sBTC + premium to seller,
+;;    collateral returned to seller
+;; 6. If seller doesn't commit within COMMIT_EXPIRY, buyer cancels and gets full refund
+;;    (price + premium)
+;; 7. If seller commits but doesn't deliver within EXPIRY, buyer cancels and receives
+;;    price + premium + collateral as compensation
 ;;
 ;; Based on catamaran-sbtc swap pattern by friedger
 ;; Extended for UTXO-specific (inscription) verification
+;; 2-phase settlement implements SEC-08/09 from issue #5
 
 ;; ============================================================
 ;; Constants
@@ -31,13 +38,19 @@
 (define-constant ERR_NOT_EXPIRED (err u13))
 (define-constant ERR_DUST_AMOUNT (err u14))
 (define-constant ERR_SELF_TRADE (err u15))
+(define-constant ERR_NOT_COMMITTED (err u16))
 (define-constant ERR_NATIVE_FAILURE (err u99))
 
 ;; Minimum listing price in sats (prevent dust listings)
 (define-constant MIN_PRICE u1000)
 
-;; Expiry in burn blocks (~100 blocks ~ ~17 hours)
+;; Expiry in burn blocks after commit (~100 blocks ~ ~17 hours)
+;; Seller must deliver within this many blocks after committing
 (define-constant EXPIRY u100)
+
+;; Commit expiry: seller must call commit-listing within this many blocks
+;; after buyer accepts (~50 blocks ~ ~8 hours)
+(define-constant COMMIT_EXPIRY u50)
 
 ;; ============================================================
 ;; Data
@@ -54,7 +67,7 @@
     inscription-vout: uint,
     ;; Pricing
     price: uint,            ;; sBTC price in sats
-    premium: uint,          ;; optional premium buyer pays to accept
+    premium: uint,          ;; optional premium buyer pays to accept (escrowed, not immediate)
     ;; Participants
     seller: principal,
     buyer: (optional principal),
@@ -62,9 +75,11 @@
     seller-btc: (buff 40),
     ;; Buyer's BTC address to receive the inscription (scriptPubKey)
     buyer-btc: (optional (buff 40)),
+    ;; SEC-09: seller collateral deposited at commit time
+    collateral: uint,
     ;; State
     when: uint,             ;; block height of last state change
-    status: (string-ascii 10),  ;; "open", "escrowed", "done", "cancelled"
+    status: (string-ascii 10),  ;; "open", "escrowed", "committed", "done", "cancelled"
   }
 )
 
@@ -115,7 +130,10 @@
   )
 )
 
-(define-public (get-out-value
+;; get-out-value: read-only helper - find first output matching a scriptPubKey
+;; Note: future sat-arithmetic verification (C1 from issue #5) should also
+;; accept an output-index parameter to confirm ordinal routing correctness.
+(define-read-only (get-out-value
     (tx {
       version: (buff 4),
       ins: (list 8 {
@@ -200,16 +218,22 @@
         buyer: none,
         seller-btc: seller-btc,
         buyer-btc: none,
+        collateral: u0,
         when: burn-block-height,
         status: "open",
       })
       ERR_INVALID_ID)
     (var-set next-id (+ id u1))
+    (print { event: "list", id: id, seller: tx-sender })
     (ok id)
   )
 )
 
-;; Buyer accepts a listing by depositing sBTC (price + premium) into escrow
+;; Buyer accepts a listing by depositing sBTC (price + premium) into escrow.
+;; SEC-08: Premium is now ESCROWED (not paid immediately to seller).
+;; This prevents the premium griefing attack (H1 from issue #5): seller cannot
+;; repeatedly list fake inscriptions, collect premiums and let them expire.
+;; The full amount (price + premium) is released to seller only on settlement.
 (define-public (accept-listing
     (id uint)
     (buyer-btc (buff 40)))
@@ -223,12 +247,9 @@
     (asserts! (is-none (get buyer listing)) ERR_ALREADY_DONE)
     ;; Prevent self-trade
     (asserts! (not (is-eq tx-sender (get seller listing))) ERR_SELF_TRADE)
-    ;; Transfer sBTC to escrow (contract holds it)
+    ;; Transfer full amount (price + premium) to escrow - both held until settlement
     (try! (sbtc-transfer total tx-sender (as-contract tx-sender)))
-    ;; Pay premium directly to seller
-    (and (> premium u0)
-      (try! (as-contract (sbtc-transfer premium tx-sender (get seller listing)))))
-    ;; Update listing
+    ;; Update listing: seller must commit within COMMIT_EXPIRY blocks
     (map-set listings id
       (merge listing {
         buyer: (some tx-sender),
@@ -236,46 +257,108 @@
         when: burn-block-height,
         status: "escrowed",
       }))
+    (print { event: "accept", id: id, buyer: tx-sender })
+    (ok true)
+  )
+)
+
+;; SEC-08: Seller commits to fulfilling the trade after buyer accepts.
+;; Seller must call this within COMMIT_EXPIRY blocks of acceptance.
+;; Seller deposits collateral (>= premium) to demonstrate seriousness.
+;; If seller fails to commit in time, buyer gets full refund (price + premium).
+;; If seller commits but fails to deliver within EXPIRY, buyer gets
+;; price + premium + collateral as compensation.
+(define-public (commit-listing
+    (id uint)
+    (collateral uint))
+  (let (
+    (listing (unwrap! (map-get? listings id) ERR_INVALID_ID))
+  )
+    ;; Must be in escrowed state (buyer has accepted, waiting for seller commit)
+    (asserts! (is-eq (get status listing) "escrowed") ERR_ALREADY_DONE)
+    ;; Only seller can commit
+    (asserts! (is-eq tx-sender (get seller listing)) ERR_FORBIDDEN)
+    ;; Must commit within COMMIT_EXPIRY blocks of acceptance
+    (asserts! (< burn-block-height (+ (get when listing) COMMIT_EXPIRY)) ERR_EXPIRED)
+    ;; SEC-09: Minimum collateral = premium (prevents griefing)
+    (asserts! (>= collateral (get premium listing)) ERR_DUST_AMOUNT)
+    ;; Deposit collateral into escrow (skip transfer if zero to avoid ft-transfer? failure)
+    (if (> collateral u0)
+      (try! (sbtc-transfer collateral tx-sender (as-contract tx-sender)))
+      true
+    )
+    ;; Update listing: reset timer for delivery phase
+    (map-set listings id (merge listing {
+      collateral: collateral,
+      status: "committed",
+      when: burn-block-height,
+    }))
+    (print { event: "commit", id: id, collateral: collateral })
     (ok true)
   )
 )
 
 ;; Cancel a listing
-;; - Seller can cancel if no buyer yet
-;; - Anyone can cancel after expiry (refunds buyer)
+;; - Seller can cancel if no buyer yet (open state)
+;; - "escrowed" + COMMIT_EXPIRY elapsed: buyer gets full refund (price + premium)
+;; - "committed" + EXPIRY elapsed: buyer gets price + premium + collateral
 (define-public (cancel-listing (id uint))
   (let ((listing (unwrap! (map-get? listings id) ERR_INVALID_ID)))
     (asserts! (not (is-eq (get status listing) "done")) ERR_ALREADY_DONE)
     (asserts! (not (is-eq (get status listing) "cancelled")) ERR_ALREADY_DONE)
-    ;; Open listing: only seller can cancel
-    ;; Escrowed listing: anyone can cancel after expiry
     (if (is-eq (get status listing) "open")
+      ;; Open listing: only seller can cancel
       (begin
         (asserts! (is-eq tx-sender (get seller listing)) ERR_FORBIDDEN)
         (map-set listings id (merge listing { status: "cancelled" }))
         (map-delete inscription-listings
           { txid: (get inscription-txid listing), vout: (get inscription-vout listing) })
+        (print { event: "cancel", id: id, status: (get status listing) })
         (ok true)
       )
-      (begin
-        ;; Escrowed -- must be expired
-        (asserts! (< (+ (get when listing) EXPIRY) burn-block-height) ERR_NOT_EXPIRED)
-        (map-set listings id (merge listing { status: "cancelled" }))
-        (map-delete inscription-listings
-          { txid: (get inscription-txid listing), vout: (get inscription-vout listing) })
-        ;; Refund buyer (price only -- premium already paid to seller)
-        (as-contract (sbtc-transfer
-          (get price listing)
-          tx-sender
-          (unwrap! (get buyer listing) ERR_NO_BUYER)))
+      (if (is-eq (get status listing) "escrowed")
+        ;; Escrowed (not yet committed): cancel after COMMIT_EXPIRY
+        ;; Seller missed their commit window - buyer gets full refund (price + premium)
+        (begin
+          (asserts! (<= (+ (get when listing) COMMIT_EXPIRY) burn-block-height) ERR_NOT_EXPIRED)
+          (map-set listings id (merge listing { status: "cancelled" }))
+          (map-delete inscription-listings
+            { txid: (get inscription-txid listing), vout: (get inscription-vout listing) })
+          (print { event: "cancel", id: id, status: (get status listing) })
+          ;; Refund buyer full amount: price + premium (premium was never paid to seller)
+          (as-contract (sbtc-transfer
+            (+ (get price listing) (get premium listing))
+            tx-sender
+            (unwrap! (get buyer listing) ERR_NO_BUYER)))
+        )
+        ;; Committed: cancel after EXPIRY (seller delivered too late)
+        ;; Buyer receives price + premium + collateral as compensation
+        (begin
+          (asserts! (<= (+ (get when listing) EXPIRY) burn-block-height) ERR_NOT_EXPIRED)
+          (map-set listings id (merge listing { status: "cancelled" }))
+          (map-delete inscription-listings
+            { txid: (get inscription-txid listing), vout: (get inscription-vout listing) })
+          (print { event: "cancel", id: id, status: (get status listing) })
+          ;; Refund buyer: price + premium + collateral (collateral = compensation for seller breach)
+          (as-contract (sbtc-transfer
+            (+ (+ (get price listing) (get premium listing)) (get collateral listing))
+            tx-sender
+            (unwrap! (get buyer listing) ERR_NO_BUYER)))
+        )
       )
     )
   )
 )
 
 ;; Submit BTC transaction proof that the inscription was delivered
+;; SEC-08: Requires "committed" state (seller must have committed collateral first)
 ;; Verifies: (1) tx spends the inscription UTXO, (2) output goes to buyer's address
+;; On settlement: seller receives price + premium; collateral is returned to seller
 ;; Anyone can submit (permissionless settlement)
+;;
+;; Note (C1 from issue #5): future version should accept output-index parameter
+;; to verify ordinal routing via sat arithmetic, preventing cases where the
+;; inscription sat routes to seller's change output rather than buyer's output.
 (define-public (submit-proof
     (id uint)
     (height uint)
@@ -302,8 +385,8 @@
       'SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.clarity-bitcoin-helper
       concat-tx tx))
   )
-    ;; Must be in escrowed state
-    (asserts! (is-eq (get status listing) "escrowed") ERR_ALREADY_DONE)
+    ;; SEC-08: Must be in committed state (not just escrowed)
+    (asserts! (is-eq (get status listing) "committed") ERR_NOT_COMMITTED)
     ;; Verify BTC tx was mined
     (match (contract-call?
       'SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.clarity-bitcoin-lib-v5
@@ -331,15 +414,26 @@
             ;; Output exists to buyer -- inscription delivered
             ;; (We check value >= 546 sats i.e. dust limit, since inscriptions sit on dust UTXOs)
             (asserts! (>= (get value out) u546) ERR_TX_VALUE_TOO_SMALL)
-            ;; Settle: release escrowed sBTC to seller
+            ;; Settle: release escrowed sBTC (price + premium) to seller
+            ;; and return seller's collateral
             (map-set listings id (merge listing { status: "done" }))
             (map-delete inscription-listings
               { txid: (get inscription-txid listing), vout: (get inscription-vout listing) })
             (map-set submitted-btc-txs mined-tx-buff id)
-            (as-contract (sbtc-transfer
-              (get price listing)
+            (print { event: "settle", id: id })
+            ;; Pay seller: price + premium
+            (try! (as-contract (sbtc-transfer
+              (+ (get price listing) (get premium listing))
               tx-sender
-              (get seller listing)))
+              (get seller listing))))
+            ;; Return collateral to seller
+            (if (> (get collateral listing) u0)
+              (as-contract (sbtc-transfer
+                (get collateral listing)
+                tx-sender
+                (get seller listing)))
+              (ok true)
+            )
           )
           ERR_TX_NOT_FOR_RECEIVER
         )
@@ -353,6 +447,8 @@
 ;; SegWit proof variant (for witness transactions)
 ;; ============================================================
 
+;; SEC-08: Requires "committed" state. Same settlement logic as submit-proof.
+;; See submit-proof for full documentation.
 (define-public (submit-proof-segwit
     (id uint)
     (height uint)
@@ -382,7 +478,8 @@
       'SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.clarity-bitcoin-helper
       concat-tx wtx))
   )
-    (asserts! (is-eq (get status listing) "escrowed") ERR_ALREADY_DONE)
+    ;; SEC-08: Must be in committed state
+    (asserts! (is-eq (get status listing) "committed") ERR_NOT_COMMITTED)
     (match (contract-call?
       'SP2PABAF9FTAJYNFZH93XENAJ8FVY99RRM50D2JG9.clarity-bitcoin-lib-v5
       was-segwit-tx-mined-compact
@@ -408,14 +505,25 @@
           out
           (begin
             (asserts! (>= (get value out) u546) ERR_TX_VALUE_TOO_SMALL)
+            ;; Settle: release price + premium to seller, return collateral
             (map-set listings id (merge listing { status: "done" }))
             (map-delete inscription-listings
               { txid: (get inscription-txid listing), vout: (get inscription-vout listing) })
             (map-set submitted-btc-txs mined-tx-buff id)
-            (as-contract (sbtc-transfer
-              (get price listing)
+            (print { event: "settle", id: id })
+            ;; Pay seller: price + premium
+            (try! (as-contract (sbtc-transfer
+              (+ (get price listing) (get premium listing))
               tx-sender
-              (get seller listing)))
+              (get seller listing))))
+            ;; Return collateral to seller
+            (if (> (get collateral listing) u0)
+              (as-contract (sbtc-transfer
+                (get collateral listing)
+                tx-sender
+                (get seller listing)))
+              (ok true)
+            )
           )
           ERR_TX_NOT_FOR_RECEIVER
         )
