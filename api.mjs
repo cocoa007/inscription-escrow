@@ -371,6 +371,7 @@ app.get('/trades/:id', async (c) => {
 // --- Ledger validation endpoints (inscription-escrow#3) ---
 
 import { validateInscription, getSellerReputation, preAcceptanceCheck } from './ledger-validator.mjs';
+import { logSettlement } from './settlement-logger.mjs';
 
 app.get('/validate/:inscriptionId', async (c) => {
   try {
@@ -401,6 +402,43 @@ app.get('/pre-check/:inscriptionId/:sellerBtcAddress', async (c) => {
   } catch (err) {
     return c.json({ error: err.message }, 500);
   }
+});
+
+// POST /trades/:id/settle — settlement logging (inscription-escrow#3 point 2)
+// Body: { from_agent, to_agent, inscription_id, price_sats, signature }
+// Agents that prefer a REST interface over module import can use this endpoint
+// to record a completed trade on the public ledger without importing the SDK.
+app.post('/trades/:id/settle', async (c) => {
+  let body;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const { from_agent, to_agent, inscription_id, price_sats, signature } = body;
+
+  if (!from_agent || !to_agent || !inscription_id || price_sats == null) {
+    return c.json(
+      { error: 'Missing required fields: from_agent, to_agent, inscription_id, price_sats' },
+      400
+    );
+  }
+
+  // Pass the caller-supplied signature through via a signFn that just returns it.
+  // If no signature is provided the logger proceeds without one.
+  const signFn = signature ? async () => signature : null;
+
+  const result = await logSettlement(
+    { from_agent, to_agent, inscription_id, price_sats },
+    signFn
+  );
+
+  if (!result.success) {
+    return c.json({ error: result.error }, 502);
+  }
+
+  return c.json({ success: true, tradeId: result.tradeId });
 });
 
 // --- Start server ---

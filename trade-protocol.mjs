@@ -15,6 +15,7 @@
  */
 
 import { parsePsbt, validateSellerPsbt, completeBuyerPsbt } from './psbt-handler.mjs';
+import { logSettlement } from './settlement-logger.mjs';
 
 /**
  * Parse a trade protocol message from inbox
@@ -133,6 +134,31 @@ export function evaluateTrade(trade, maxBudget, currentBalance) {
   }
 
   return { action: 'ignore', reason: `Unknown trade action: ${trade.action}` };
+}
+
+/**
+ * Handle trade completion: log the settled trade to the public ledger.
+ *
+ * Implements inscription-escrow#3 point 2.
+ * This should be called after the buyer has broadcast the PSBT and the
+ * trade is confirmed complete. Logging failure is non-fatal — the escrow
+ * flow continues regardless.
+ *
+ * @param {Object} trade      - Parsed trade message (from parseTradeMessage)
+ * @param {string} fromAgent  - Seller BTC address
+ * @param {string} toAgent    - Buyer BTC address
+ * @param {number} priceSats  - Final agreed price in satoshis
+ * @param {Function} signFn   - Async function(message: string) => base64 signature
+ * @returns {Promise<{success: boolean, tradeId: string|null, error: string|null}>}
+ */
+export async function handleTradeCompletion(trade, fromAgent, toAgent, priceSats, signFn) {
+  const tradeData = {
+    from_agent: fromAgent,
+    to_agent: toAgent,
+    inscription_id: trade.inscriptionId,
+    price_sats: priceSats,
+  };
+  return logSettlement(tradeData, signFn);
 }
 
 // --- CLI ---
