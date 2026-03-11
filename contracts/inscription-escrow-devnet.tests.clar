@@ -1,5 +1,5 @@
 ;; inscription-escrow fuzz tests for Rendezvous (rv)
-;; 
+;;
 ;; Property-based tests: verify individual function behavior across random inputs
 ;; Invariant tests: verify state consistency across random operation sequences
 ;;
@@ -10,7 +10,7 @@
 ;; Property-based tests (test-* functions)
 ;; ============================================================
 
-;; Property: listing with price >= MIN_PRICE (u1000) always succeeds for unique inscriptions
+;; Property: listing with price >= MIN_PRICE and valid premium always succeeds for unique inscriptions
 (define-public (test-list-inscription-valid-price
     (inscription-txid (buff 32))
     (inscription-vout uint)
@@ -21,16 +21,20 @@
     ;; Discard if price below minimum
     (if (< price u1000)
       (ok false)
-      (match (list-inscription inscription-txid inscription-vout price premium seller-btc)
-        success (ok true)
-        error
-          ;; ERR_LISTING_EXISTS (u10) is acceptable - duplicate inscription UTXO
-          (if (is-eq error u10)
-            (ok false)
-            (begin
-              (print { test: "list-valid-price", error: error })
-              (err u100)
-            ))
+      ;; Discard if premium exceeds 20% cap
+      (if (> (* premium u100) (* price u20))
+        (ok false)
+        (match (list-inscription inscription-txid inscription-vout price premium seller-btc)
+          success (ok true)
+          error
+            ;; ERR_LISTING_EXISTS (u10) is acceptable - duplicate inscription UTXO
+            (if (is-eq error u10)
+              (ok false)
+              (begin
+                (print { test: "list-valid-price", error: error })
+                (err u100)
+              ))
+        )
       )
     )
   )
@@ -55,6 +59,34 @@
               (print { test: "dust-rejected", expected: u14, got: error })
               (err u201)
             ))
+      )
+    )
+  )
+)
+
+;; Property: listing with premium > 20% of price always fails with ERR_PREMIUM_TOO_HIGH
+(define-public (test-list-inscription-premium-cap
+    (inscription-txid (buff 32))
+    (inscription-vout uint)
+    (price uint)
+    (premium uint)
+    (seller-btc (buff 40)))
+  (begin
+    ;; Only test valid price and premium that exceeds the cap
+    (if (< price u1000)
+      (ok false)
+      (if (<= (* premium u100) (* price u20))
+        (ok false)
+        (match (list-inscription inscription-txid inscription-vout price premium seller-btc)
+          success (err u210)  ;; FAIL: premium should have been rejected
+          error
+            (if (is-eq error u18)  ;; ERR_PREMIUM_TOO_HIGH
+              (ok true)
+              (begin
+                (print { test: "premium-cap-rejected", expected: u18, got: error })
+                (err u211)
+              ))
+        )
       )
     )
   )
@@ -107,6 +139,54 @@
   )
 )
 
+;; Property: confirm-delivery fails on non-existent listing
+(define-public (test-confirm-nonexistent-listing (id uint))
+  (let ((nid (get-next-id)))
+    (if (< id nid)
+      (ok false)
+      (match (confirm-delivery id)
+        success (err u600)
+        error
+          (if (is-eq error u3)  ;; ERR_INVALID_ID
+            (ok true)
+            (err u601))
+      )
+    )
+  )
+)
+
+;; Property: reject-delivery fails on non-existent listing
+(define-public (test-reject-nonexistent-listing (id uint))
+  (let ((nid (get-next-id)))
+    (if (< id nid)
+      (ok false)
+      (match (reject-delivery id)
+        success (err u700)
+        error
+          (if (is-eq error u3)  ;; ERR_INVALID_ID
+            (ok true)
+            (err u701))
+      )
+    )
+  )
+)
+
+;; Property: timeout-delivery fails on non-existent listing
+(define-public (test-timeout-nonexistent-listing (id uint))
+  (let ((nid (get-next-id)))
+    (if (< id nid)
+      (ok false)
+      (match (timeout-delivery id)
+        success (err u800)
+        error
+          (if (is-eq error u3)  ;; ERR_INVALID_ID
+            (ok true)
+            (err u801))
+      )
+    )
+  )
+)
+
 ;; ============================================================
 ;; Invariant tests (invariant-* functions)
 ;; ============================================================
@@ -127,6 +207,9 @@
             (or
               (is-eq status "open")
               (is-eq status "escrowed")
+              (is-eq status "committed")
+              (is-eq status "delivered")
+              (is-eq status "disputed")
               (is-eq status "done")
               (is-eq status "cancelled")))
         true
@@ -167,6 +250,40 @@
   )
 )
 
+;; Invariant: "delivered" listings always have a buyer and a non-zero delivery-block
+(define-read-only (invariant-delivered-has-buyer-and-block)
+  (let ((nid (get-next-id)))
+    (if (is-eq nid u0)
+      true
+      (match (get-listing u0)
+        listing
+          (if (is-eq (get status listing) "delivered")
+            (and
+              (is-some (get buyer listing))
+              (> (get delivery-block listing) u0))
+            true)
+        true
+      )
+    )
+  )
+)
+
+;; Invariant: "disputed" listings always have a buyer
+(define-read-only (invariant-disputed-has-buyer)
+  (let ((nid (get-next-id)))
+    (if (is-eq nid u0)
+      true
+      (match (get-listing u0)
+        listing
+          (if (is-eq (get status listing) "disputed")
+            (is-some (get buyer listing))
+            true)
+        true
+      )
+    )
+  )
+)
+
 ;; Invariant: price is always >= MIN_PRICE for any existing listing
 (define-read-only (invariant-price-above-minimum)
   (let ((nid (get-next-id)))
@@ -174,6 +291,20 @@
       true
       (match (get-listing u0)
         listing (>= (get price listing) u1000)
+        true
+      )
+    )
+  )
+)
+
+;; Invariant: premium is always <= 20% of price for any existing listing
+(define-read-only (invariant-premium-within-cap)
+  (let ((nid (get-next-id)))
+    (if (is-eq nid u0)
+      true
+      (match (get-listing u0)
+        listing
+          (<= (* (get premium listing) u100) (* (get price listing) u20))
         true
       )
     )
