@@ -72,7 +72,7 @@ submit-proof  │  cancel (expired)
 | `inscription-txid` | `(buff 32)` | Bitcoin txid of the UTXO holding the inscription |
 | `inscription-vout` | `uint` | Output index of the inscription UTXO |
 | `price` | `uint` | Asking price in sBTC sats |
-| `premium` | `uint` | Optional premium buyer pays (goes directly to seller on accept) |
+| `premium` | `uint` | Optional premium buyer pays (escrowed with price until settlement per SEC-08) |
 | `seller` | `principal` | Seller's Stacks address |
 | `buyer` | `(optional principal)` | Buyer's Stacks address (set on accept) |
 | `seller-btc` | `(buff 40)` | Seller's BTC scriptPubKey (for output verification) |
@@ -121,7 +121,7 @@ Buyer deposits sBTC (price + premium) into escrow.
 - No existing buyer
 - Buyer cannot be the seller (no self-trade)
 - sBTC transfer must succeed
-- Premium (if any) is paid directly to seller immediately
+- Premium (if any) is escrowed with price until settlement (SEC-08)
 
 #### `cancel-listing`
 ```clarity
@@ -132,8 +132,10 @@ Cancel a listing.
 
 **Rules:**
 - `open` state: only the seller can cancel
-- `escrowed` state: anyone can cancel, but only after expiry (~100 burn blocks / ~17 hours)
-- On cancellation of escrowed listing: buyer gets refund of `price` (premium is non-refundable)
+- `escrowed` state: anyone can cancel, but only after COMMIT_EXPIRY (~50 burn blocks / ~8 hours)
+- On cancellation of escrowed listing: buyer gets full refund (price + premium, both escrowed per SEC-08)
+- `committed` state: anyone can cancel after EXPIRY (~100 burn blocks / ~17 hours from commit)
+- On cancellation of committed listing: buyer receives price + premium + collateral as compensation
 - `done` or `cancelled`: cannot cancel again
 
 #### `submit-proof` (Legacy)
@@ -184,6 +186,7 @@ Same logic as `submit-proof` but for SegWit transactions. Uses `was-segwit-tx-mi
 | `u13` | `ERR_NOT_EXPIRED` | Cannot cancel — listing hasn't expired yet |
 | `u14` | `ERR_DUST_AMOUNT` | Price below minimum (1,000 sats) |
 | `u15` | `ERR_SELF_TRADE` | Buyer and seller are the same principal |
+| `u16` | `ERR_NOT_COMMITTED` | submit-proof called before seller commits (SEC-08) |
 | `u99` | `ERR_NATIVE_FAILURE` | Internal Clarity error |
 
 ## Dependencies
@@ -225,7 +228,7 @@ The trade protocol (`trade-protocol.mjs`) handles negotiation via JSON messages:
 4. **Self-trade prevention**: Buyer and seller must be different principals.
 5. **Expiry protection**: Buyer's sBTC is refunded if seller doesn't deliver within ~17 hours.
 6. **Permissionless settlement**: Anyone can submit the proof — no party can hold the trade hostage.
-7. **Non-refundable premium**: Premium goes to seller on accept, incentivizing honest listing.
+7. **SEC-08/09 Griefing Protection**: Premium and collateral are escrowed (not paid immediately). Seller must commit collateral >= premium. If seller fails to commit or deliver, buyer receives full refund + compensation from collateral.
 
 ## Test Coverage
 
@@ -236,8 +239,10 @@ The trade protocol (`trade-protocol.mjs`) handles negotiation via JSON messages:
 - Seller cancellation (open state)
 - Expiry-based cancellation and refund (escrowed state)
 - Premature cancellation rejection
-- Premium flow (immediate payment to seller)
+- Premium flow (escrowed, not paid immediately per SEC-08)
 - Dust amount rejection
+
+**Coverage Gap:** `submit-proof` and `submit-proof-segwit` success paths are not tested. These functions require Bitcoin merkle proof construction which is complex to mock in unit tests. Consider integration tests with real Bitcoin block data or test vectors.
 
 ## Status
 
